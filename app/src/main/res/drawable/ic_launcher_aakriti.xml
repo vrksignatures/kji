@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher icon before Android 8: Aakriti on a pale disc. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#F1F1FB" />
+        </shape>
+    </item>
+    <item
+        android:bottom="2dp"
+        android:drawable="@drawable/aakriti"
+        android:left="2dp"
+        android:right="2dp"
+        android:top="2dp" />
+</layer-list>

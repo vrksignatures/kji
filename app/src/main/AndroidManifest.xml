@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      INTERNET is for the music only: MusicEngine streams songs with ExoPlayer and
+      YouTubeAudio asks YouTube where a song's sound-only stream is. The accessibility
+      service - the part that reads and presses the Sudha app - never opens a connection.
+      QUERY_ALL_PACKAGES is only used to verify that the configured target package
+      is actually installed before START is allowed, and to see whether WhatsApp is there
+      before offering to send a report with it.
+      POST_NOTIFICATIONS is for Aakriti: "kaam complete hua", "I learned a new name" and
+      "I am stuck, here is the report".
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Special-use foreground service permission is API 34+; harmless on older devices. -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        tools:targetApi="34" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher_aakriti"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SudhaAutoBot">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The accessibility service itself. permission BIND_ACCESSIBILITY_SERVICE is
+          what makes Android list it under Settings > Accessibility.
+        -->
+        <service
+            android:name=".SudhaAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
+          Hands Aakriti's report (a text file and a picture of the screen) to the app the
+          person chooses to send it with. Not exported: another app can read one file, and
+          only while holding the permission granted by the share itself.
+        -->
+        <provider
+            android:name=".ReportProvider"
+            android:authorities="${applicationId}.reports"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+
+</manifest>
