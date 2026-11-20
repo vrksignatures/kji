@@ -1,0 +1,185 @@
+name: Build APK
+
+# Builds a debug APK on every push to main (and on demand), then publishes it as a
+# downloadable artifact and a rolling "latest" release.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Only one release per commit; a newer push supersedes an in-flight build.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Assemble debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Runs the app's own calendar and list-scrolling classes on a plain JVM, against
+      # frames cut from the device recording and against models of the screens. A failure
+      # stops the build before any APK is produced. See tools/selftest/README.md.
+      - name: Self-tests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          if ! bash tools/selftest/run.sh 2>&1 | tee selftest.log; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              { echo '### Self-tests failed'; echo '```'; tail -n 80 selftest.log; echo '```'; } > selftest.md
+              gh pr comment "${{ github.event.pull_request.number }}" --body-file selftest.md || true
+            fi
+            exit 1
+          fi
+          { echo '### Self-tests'; echo '```'; grep -E "^== |CHECKS" selftest.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # Pinned so the build does not depend on the runner's preinstalled Gradle.
+          gradle-version: '8.11.1'
+
+      - name: Assemble debug
+        id: assemble
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon assembleDebug --stacktrace 2>&1 | tee build.log
+
+      # Surfaces compiler output in the run summary when the build fails, so the
+      # failure is visible without downloading the log archive.
+      - name: Publish build log on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo '### Build output' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "error:|warning:|What went wrong|FAILED|Caused by|> " build.log | head -200 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Posts the compiler diagnostics as a PR comment so they can be read without
+      # downloading the (large, often unreachable) raw log archive.
+      - name: Post diagnostics to pull request
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Gradle failure summary"
+            echo '```'
+            grep -E "error:|What went wrong|FAILED|Caused by|Execution failed" build.log | head -60
+            echo '```'
+          } > comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file comment.md
+
+      - name: Show build outputs
+        if: always()
+        run: ls -la app/build/outputs/apk/debug/ || true
+
+      # The music needs two libraries inside the APK (ExoPlayer, and NewPipe Extractor with
+      # the script engine and the java.* additions it relies on). A build can succeed with
+      # one of them left out; this looks inside the APK and fails if it is not there. It
+      # also holds the "silent UI" line: no sound clip is packed.
+      - name: Check what is in the APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          mkdir -p apkcheck && unzip -q -o "$apk" 'classes*.dex' -d apkcheck
+          unzip -l "$apk" | awk 'NR>3 {print $4}' > apkcheck/files.txt
+          missing=0
+          {
+            echo "### What is in the APK"
+            echo '```'
+            echo "size: $(stat -c %s "$apk") bytes, $(ls apkcheck/*.dex | wc -l) dex file(s), $(wc -l < apkcheck/files.txt) entries"
+            for class in \
+                'Landroidx/media3/exoplayer/ExoPlayer;' \
+                'Landroidx/media3/exoplayer/hls/HlsMediaSource;' \
+                'Lorg/schabi/newpipe/extractor/NewPipe;' \
+                'Lorg/schabi/newpipe/extractor/services/youtube/YoutubeService;' \
+                'Lorg/schabi/newpipe/extractor/timeago/PatternsManager;' \
+                'Lorg/mozilla/javascript/Context;' \
+                'Lcom/grack/nanojson/JsonParser;' \
+                'Lorg/jsoup/Jsoup;' \
+                'Lj$/nio/file/' \
+                'Lcom/vrksignatures/sudhaautobot/YouTubeAudio;' \
+                'Lcom/vrksignatures/sudhaautobot/MusicEngine;' \
+                'Lcom/vrksignatures/sudhaautobot/ScrollMemory;' \
+                'Lcom/vrksignatures/sudhaautobot/CopyOutcome;' \
+                'Lcom/vrksignatures/sudhaautobot/SkipLog;' \
+                'Lcom/vrksignatures/sudhaautobot/WaveBars;' \
+                'Lcom/vrksignatures/sudhaautobot/Tempo;' \
+                'Lcom/vrksignatures/sudhaautobot/Glass;' \
+                'Lcom/vrksignatures/sudhaautobot/SudhaAccessibilityService;'; do
+              if grep -a -q -F "$class" apkcheck/*.dex; then echo "in the APK   $class"
+              else echo "MISSING      $class"; missing=1; fi
+            done
+            clips=$(grep -c -E '^res/raw/|\.(ogg|mp3|wav|m4a)$' apkcheck/files.txt || true)
+            echo "sound clips packed: $clips"
+            [ "$clips" = "0" ] || missing=1
+            echo "service files: $(grep -c '^META-INF/services/' apkcheck/files.txt || true)"
+            echo "compiler warnings in the app's own code:"
+            grep -E "sudhaautobot/.*warning:|^Note: " build.log | sed 's|.*/sudhaautobot/||' | sort | uniq | head -30 || true
+            echo '```'
+          } > apkcheck/report.md
+          cat apkcheck/report.md
+          cat apkcheck/report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            {
+              echo '<details><summary>Libraries in the build</summary>'
+              echo
+              echo '```'
+              gradle --no-daemon -q :app:dependencies --configuration debugRuntimeClasspath 2>/dev/null \
+                | grep -o -E '[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[^ ]+( -> [^ ]+)?' | sed -E 's/:[^ ]+ -> /:/' \
+                | sort -u | head -150
+              echo '```'
+              echo '</details>'
+            } >> apkcheck/report.md || true
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file apkcheck/report.md || true
+          fi
+          exit $missing
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SudhaAutoBot-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # Publishes SudhaAutoBot-debug.apk as a stable download URL on main.
+      - name: Publish rolling release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: SudhaAutoBot (latest main build)
+          body: |
+            Automated debug build from ${{ github.sha }}.
+
+            Install `SudhaAutoBot-debug.apk`, grant "display over other apps",
+            enable the accessibility service, then press START on the floating panel.
+          files: app/build/outputs/apk/debug/app-debug.apk
+          prerelease: true
+          make_latest: false
